@@ -7,9 +7,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Random;
 import java.util.regex.Pattern;
@@ -37,12 +35,11 @@ public class CharacterIterator implements DataSetIterator {
   private Charset textFileEncoding;
   // Size of each minibatch (number of examples)
   private final int miniBatchSize;
-  // Valid characters
-  private final char[] validCharacters;
-  private final Random rng;
-  // Maps each character to an index ind the input/output
-  private final Map<Character, Integer> charToIdxMap = new HashMap<>();
+  // Valid characters sorted for binary search
+  private final char[] sortedChars;
+  // Regex matcbing invalid characters
   private final Pattern invalidCharsPattern;
+  private final Random rng;
 
   private int cursor;
 
@@ -67,16 +64,12 @@ public class CharacterIterator implements DataSetIterator {
     this.files = Arrays.asList(folder.listFiles());
     this.textFileEncoding = textFileEncoding;
     this.miniBatchSize = miniBatchSize;
-    this.validCharacters = validCharacters;
+    sortedChars = Arrays.copyOf(validCharacters, validCharacters.length);
+    Arrays.sort(sortedChars);
     this.rng = rng;
 
-    // Store valid characters is a map for later use in vectorization
-    for (int n = validCharacters.length; --n >= 0; ) {
-      charToIdxMap.put(validCharacters[n], n);
-    }
-
     // Create regex that matches invalid characters
-    String escaped = new String(validCharacters).replaceAll("[\\W]", "\\\\$0");
+    String escaped = new String(sortedChars).replaceAll("[\\W]", "\\\\$0");
     String regex = new StringBuilder("[^").append(escaped).append("]").toString();
     invalidCharsPattern = Pattern.compile(regex);
 
@@ -118,15 +111,15 @@ public class CharacterIterator implements DataSetIterator {
   }
 
   public char convertIndexToCharacter(int idx) {
-    return validCharacters[idx];
+    return sortedChars[idx];
   }
 
   public int convertCharacterToIndex(char c) {
-    return charToIdxMap.get(c);
+    return Arrays.binarySearch(sortedChars, c);
   }
 
   public char getRandomCharacter() {
-    return validCharacters[rng.nextInt(validCharacters.length)];
+    return sortedChars[rng.nextInt(sortedChars.length)];
   }
 
   @Override
@@ -155,15 +148,16 @@ public class CharacterIterator implements DataSetIterator {
     int maxLength = 0;
     List<String> batch = new ArrayList<>(num);
     for (int n = num; --n >= 0 && hasNext(); cursor++) {
-      List<String> lines = Files.readAllLines(files.get(cursor).toPath(), textFileEncoding);
+      File file = files.get(cursor);
+      List<String> lines = Files.readAllLines(file.toPath(), textFileEncoding);
       // Normalize line endings
       String text = lines.stream().collect(Collectors.joining("\n", "", "\n"));
       // Remove invalid characters
       String valid = invalidCharsPattern.matcher(text).replaceAll("");
 
-      System.out.format(
-          "Loaded and converted file: %d valid characters of %d total characters (%d removed)\n",
-          valid.length(), text.length(), text.length() - valid.length());
+//      System.out.format(
+//          "Loaded and converted %s:\t %d valid characters of %d total characters (%d removed)\n",
+//          file.getName(), valid.length(), text.length(), text.length() - valid.length());
 
       if (!valid.isEmpty()) {
         batch.add(valid);
@@ -175,20 +169,19 @@ public class CharacterIterator implements DataSetIterator {
     // TODO: check empty?
 
     // We have batchSize examples of varying lengths
-    INDArray features = Nd4j.create(new int[]{batchSize, validCharacters.length, maxLength}, 'f');
-    INDArray labels = Nd4j.create(new int[]{batchSize, validCharacters.length, maxLength}, 'f');
+    INDArray features = Nd4j.create(new int[]{batchSize, sortedChars.length, maxLength}, 'f');
+    INDArray labels = Nd4j.create(new int[]{batchSize, sortedChars.length, maxLength}, 'f');
     INDArray featuresMask = Nd4j.zeros(batchSize, maxLength, 'f');
     INDArray labelsMask = Nd4j.zeros(batchSize, maxLength, 'f');
 
     for (int i = 0; i < batchSize; i++) {
       String text = batch.get(i);
-      int j = 0;
       // Current input
-      int currCharIdx = charToIdxMap.get(text.charAt(j));
-      for (int jEnd = text.length() - 1; j < jEnd; j++) {
-        // Next character to predict
-        int nextCharIdx = charToIdxMap.get(text.charAt(j + 1));
+      int currCharIdx = convertCharacterToIndex(text.charAt(0));
+      for (int j = 0; j < text.length() - 1; j++) {
         features.putScalar(new int[]{i, currCharIdx, j}, 1.0);
+        // Next character to predict
+        int nextCharIdx = convertCharacterToIndex(text.charAt(j + 1));
         labels.putScalar(new int[]{i, nextCharIdx, j}, 1.0);
         featuresMask.putScalar(new int[]{i, j}, 1.0);
         labelsMask.putScalar(new int[]{i, j}, 1.0);
@@ -206,12 +199,12 @@ public class CharacterIterator implements DataSetIterator {
 
   @Override
   public int inputColumns() {
-    return validCharacters.length;
+    return sortedChars.length;
   }
 
   @Override
   public int totalOutcomes() {
-    return validCharacters.length;
+    return sortedChars.length;
   }
 
   @Override

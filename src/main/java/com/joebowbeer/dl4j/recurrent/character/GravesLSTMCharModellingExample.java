@@ -5,9 +5,11 @@ import java.io.IOException;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
-import java.util.concurrent.ThreadLocalRandom;
 import org.apache.commons.io.FileUtils;
+import org.deeplearning4j.api.storage.StatsStorage;
 import org.deeplearning4j.nn.api.Layer;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.BackpropType;
@@ -18,10 +20,13 @@ import org.deeplearning4j.nn.conf.layers.GravesLSTM;
 import org.deeplearning4j.nn.conf.layers.RnnOutputLayer;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.weights.WeightInit;
+import org.deeplearning4j.optimize.api.IterationListener;
 import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
+import org.deeplearning4j.ui.api.UIServer;
+import org.deeplearning4j.ui.stats.StatsListener;
+import org.deeplearning4j.ui.storage.InMemoryStatsStorage;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.api.ndarray.INDArray;
-import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.lossfunctions.LossFunctions.LossFunction;
 
@@ -49,12 +54,12 @@ public class GravesLSTMCharModellingExample {
     int miniBatchSize = 32;
     // Length of each training example sequence to use. This could certainly be increased
     int exampleLength = 1000;
-     // Length for truncated backpropagation through time. i.e., update params every 50 characters
+    // Length for truncated backpropagation through time. i.e., update params every 50 characters
+    // 1000 characters / 50 tbptt length: 20 parameter updates per minibatch
     int tbpttLength = 50;
     // Total number of training epochs
     int numEpochs = 1;
     // How frequently to generate samples from the network?
-    // 1000 characters / 50 tbptt length: 20 parameter updates per minibatch
     int generateSamplesEveryNMinibatches = 10;
     // Number of samples to generate after each training epoch
     int nSamplesToGenerate = 4;
@@ -64,7 +69,8 @@ public class GravesLSTMCharModellingExample {
     // Used to 'prime' the LSTM with a character sequence to continue/complete.
     // These characters must all be in CharacterIterator.getMinimalCharacterSet() by default
     String generationInitialization = null;
-    Random rng = ThreadLocalRandom.current();
+    // Use Random with seed for reproducibility
+    Random rng = new Random(12345);
 
     // Get a DataSetIterator that handles vectorization of text into something we can use to train
     // our GravesLSTM network.
@@ -96,7 +102,9 @@ public class GravesLSTMCharModellingExample {
 
     MultiLayerNetwork net = new MultiLayerNetwork(conf);
     net.init();
-    net.setListeners(new ScoreIterationListener(1));
+
+    List<IterationListener> listeners = new ArrayList<>();
+    listeners.add(new ScoreIterationListener());
 
     // Print the  number of parameters in the network (and for each layer)
     Layer[] layers = net.getLayers();
@@ -108,12 +116,24 @@ public class GravesLSTMCharModellingExample {
     }
     System.out.println("Total number of network parameters: " + totalNumParams);
 
+    // Initialize the user interface backend
+    UIServer uiServer = UIServer.getInstance();
+    // Configure where the network information is to be stored.
+    // Use new FileStatsStorage(File) for saving and loading later
+    StatsStorage statsStorage = new InMemoryStatsStorage();
+    // Attach the StatsStorage instance to the UI.
+    // This allows the contents of the StatsStorage to be visualized
+    uiServer.attach(statsStorage);
+    //Then add the StatsListener to collect this information from the network, as it trains
+    listeners.add(new StatsListener(statsStorage));
+
+    net.setListeners(listeners);
+
     // Do training, and then generate and print samples from network
     int miniBatchNumber = 0;
     for (int i = 0; i < numEpochs; i++) {
       while (iter.hasNext()) {
-        DataSet ds = iter.next();
-        net.fit(ds);
+        net.fit(iter.next());
         if (++miniBatchNumber % generateSamplesEveryNMinibatches == 0) {
           System.out.println("--------------------");
           System.out.println("Completed " + miniBatchNumber + " minibatches of size "
@@ -200,7 +220,8 @@ public class GravesLSTMCharModellingExample {
     }
 
     // Create input for initialization
-    INDArray initializationInput = Nd4j.zeros(numSamples, iter.inputColumns(), initialization.length());
+    INDArray initializationInput =
+        Nd4j.zeros(numSamples, iter.inputColumns(), initialization.length());
     char[] init = initialization.toCharArray();
     for (int i = 0; i < init.length; i++) {
       int idx = iter.convertCharacterToIndex(init[i]);
@@ -214,7 +235,7 @@ public class GravesLSTMCharModellingExample {
       sb[i] = new StringBuilder(initialization);
     }
 
-    // Sample from network and feed samples back into input one character at a time (for all samples)
+    // Sample from network and feed samples back as input one character at a time (for all samples)
     // Sampling is done in parallel here
     net.rnnClearPreviousState();
     INDArray output = net.rnnTimeStep(initializationInput);
