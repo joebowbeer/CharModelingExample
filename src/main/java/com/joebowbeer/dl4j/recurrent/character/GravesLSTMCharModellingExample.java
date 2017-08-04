@@ -52,29 +52,44 @@ public class GravesLSTMCharModellingExample {
     int lstmLayerSize = 200;
     // Size of mini batch to use when  training
     int miniBatchSize = 32;
-    // Length of each training example sequence to use. This could certainly be increased
-    int exampleLength = 1000;
+//    // Length of each training example sequence to use. This could certainly be increased
+//    int exampleLength = 1000;
     // Length for truncated backpropagation through time. i.e., update params every 50 characters
     // 1000 characters / 50 tbptt length: 20 parameter updates per minibatch
-    int tbpttLength = 50;
+    int tbpttLength = 100;
     // Total number of training epochs
-    int numEpochs = 1;
+    int numEpochs = 20;
     // How frequently to generate samples from the network?
-    int generateSamplesEveryNMinibatches = 10;
+    int generateSamplesEveryNMinibatches = 4;
     // Number of samples to generate after each training epoch
-    int nSamplesToGenerate = 4;
+    int nSamplesToGenerate = 3;
     // Length of each sample to generate
-    int nCharactersToSample = 300;
+    //int nCharactersToSample = 30;
     // Optional character initialization; a random character is used if null.
     // Used to 'prime' the LSTM with a character sequence to continue/complete.
     // These characters must all be in CharacterIterator.getMinimalCharacterSet() by default
-    String generationInitialization = null;
+    String generationInitialization = "^";
     // Use Random with seed for reproducibility
     Random rng = new Random(12345);
 
+    List<IterationListener> listeners = new ArrayList<>();
+
+    // Initialize the user interface backend
+    UIServer uiServer = UIServer.getInstance();
+    // Configure where the network information is to be stored.
+    // Use new FileStatsStorage(File) for saving and loading later
+    StatsStorage statsStorage = new InMemoryStatsStorage();
+    // Attach the StatsStorage instance to the UI.
+    // This allows the contents of the StatsStorage to be visualized
+    uiServer.attach(statsStorage);
+    //Then add the StatsListener to collect this information from the network, as it trains
+    listeners.add(new StatsListener(statsStorage));
+
+    listeners.add(new ScoreIterationListener());
+
     // Get a DataSetIterator that handles vectorization of text into something we can use to train
     // our GravesLSTM network.
-    CharacterIterator iter = getShakespeareIterator(miniBatchSize, exampleLength, rng);
+    DanceIterator iter = getDanceIterator(miniBatchSize, rng);
     int nOut = iter.totalOutcomes();
 
     // Set up network configuration:
@@ -102,9 +117,7 @@ public class GravesLSTMCharModellingExample {
 
     MultiLayerNetwork net = new MultiLayerNetwork(conf);
     net.init();
-
-    List<IterationListener> listeners = new ArrayList<>();
-    listeners.add(new ScoreIterationListener());
+    net.setListeners(listeners);
 
     // Print the  number of parameters in the network (and for each layer)
     Layer[] layers = net.getLayers();
@@ -116,19 +129,6 @@ public class GravesLSTMCharModellingExample {
     }
     System.out.println("Total number of network parameters: " + totalNumParams);
 
-    // Initialize the user interface backend
-    UIServer uiServer = UIServer.getInstance();
-    // Configure where the network information is to be stored.
-    // Use new FileStatsStorage(File) for saving and loading later
-    StatsStorage statsStorage = new InMemoryStatsStorage();
-    // Attach the StatsStorage instance to the UI.
-    // This allows the contents of the StatsStorage to be visualized
-    uiServer.attach(statsStorage);
-    //Then add the StatsListener to collect this information from the network, as it trains
-    listeners.add(new StatsListener(statsStorage));
-
-    net.setListeners(listeners);
-
     // Do training, and then generate and print samples from network
     int miniBatchNumber = 0;
     for (int i = 0; i < numEpochs; i++) {
@@ -137,11 +137,11 @@ public class GravesLSTMCharModellingExample {
         if (++miniBatchNumber % generateSamplesEveryNMinibatches == 0) {
           System.out.println("--------------------");
           System.out.println("Completed " + miniBatchNumber + " minibatches of size "
-              + miniBatchSize + "x" + exampleLength + " characters");
+              + miniBatchSize);
           System.out.println("Sampling characters from network given initialization \""
               + (generationInitialization == null ? "" : generationInitialization) + "\"");
           String[] samples = sampleCharactersFromNetwork(generationInitialization, net, iter, rng,
-              nCharactersToSample, nSamplesToGenerate);
+              nSamplesToGenerate);
           for (int j = 0; j < samples.length; j++) {
             System.out.println("----- Sample " + j + " -----");
             System.out.println(samples[j]);
@@ -154,6 +154,7 @@ public class GravesLSTMCharModellingExample {
     }
 
     System.out.println("\n\nExample complete");
+    //uiServer.detach(statsStorage); // TODO?
   }
 
   /**
@@ -201,6 +202,38 @@ public class GravesLSTMCharModellingExample {
   }
 
   /**
+   * Downloads American Country Dance training data and stores it locally (temp directory).
+   * Then set up and return a simple DataSetIterator that does vectorization based on the text.
+   *
+   * @param miniBatchSize Number of text segments in each training mini-batch
+   * @param rng
+   * @return 
+   * @throws java.io.IOException 
+   */
+  public static DanceIterator getDanceIterator(int miniBatchSize, Random rng)
+      throws IOException {
+    String url = "https://www.ibiblio.org/contradance/index/by_title.html";
+    String tempDir = System.getProperty("java.io.tmpdir");
+    // Storage location for downloaded file
+    File file = new File(tempDir, "dl4j-rnn-ibiblio.html");
+    Charset encoding = Charset.forName("UTF-8");
+    if (!file.exists()) {
+      FileUtils.copyURLToFile(new URL(url), file);
+      System.out.println("File downloaded to " + file);
+    } else {
+      System.out.println("Using existing text in " + file);
+    }
+
+    if (!file.exists()) {
+      // Download problem?
+      throw new IOException("File does not exist: " + file);
+    }
+    // Which characters are allowed? Others will be removed
+    char[] validCharacters = CharacterIterator.getDefaultCharacterSet();
+    return new DanceIterator(file, encoding, miniBatchSize, validCharacters, rng);
+  }
+
+  /**
    * Generate a sample from the network, given an (optional, possibly null) initialization.
    * Initialization can be used to 'prime' the RNN with a sequence you want to extend/continue.<br>
    * Note that the initialization is used for all samples
@@ -213,7 +246,7 @@ public class GravesLSTMCharModellingExample {
    * @param iter CharacterIterator. Used for going from indexes back to characters
    */
   private static String[] sampleCharactersFromNetwork(String initialization, MultiLayerNetwork net,
-      CharacterIterator iter, Random rng, int charactersToSample, int numSamples) {
+      DanceIterator iter, Random rng, int numSamples) {
     // Set up initialization. If no initialization: use a random character
     if (initialization == null) {
       initialization = String.valueOf(iter.getRandomCharacter());
@@ -242,12 +275,16 @@ public class GravesLSTMCharModellingExample {
     // Gets the last time step output
     output = output.tensorAlongDimension(output.size(2) - 1, 1, 0);
 
-    for (int i = 0; i < charactersToSample; i++) {
+    while(true) {
       // Set up next input (single time step) by sampling from previous output
       INDArray nextInput = Nd4j.zeros(numSamples, iter.inputColumns());
       // Output is a probability distribution.
       // Sample from this for each example we want to generate, and add it to the new input
+      boolean appended = false;
       for (int s = 0; s < numSamples; s++) {
+        if (sb[s].toString().endsWith("\n")) {
+          continue;
+        }
         double[] outputProbDistribution = new double[iter.totalOutcomes()];
         for (int j = 0; j < outputProbDistribution.length; j++) {
           outputProbDistribution[j] = output.getDouble(s, j);
@@ -258,14 +295,18 @@ public class GravesLSTMCharModellingExample {
         nextInput.putScalar(new int[]{s, sampledCharacterIdx}, 1.0f);
         // Add sampled character to StringBuilder (human readable output)
         sb[s].append(iter.convertIndexToCharacter(sampledCharacterIdx));
+        appended = true;
       }
 
+      if (!appended) {
+        break;
+      }
       output = net.rnnTimeStep(nextInput); // Do one time step of forward pass
     }
 
     String[] out = new String[numSamples];
     for (int i = 0; i < numSamples; i++) {
-      out[i] = sb[i].toString();
+      out[i] = sb[i].substring(1);
     }
     return out;
   }
